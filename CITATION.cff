@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the paper below and the PPG-DaLiA dataset."
+title: "Deep PPG: Improving Heart Rate Estimates with Activity Prediction — starter implementation"
+type: software
+version: 0.1.0
+license: MIT
+authors:
+  - family-names: Veluguri
+    given-names: Sai Pavan
+preferred-citation:
+  type: conference-paper
+  authors:
+    - family-names: Veluguri
+      given-names: Sai Pavan
+  title: "Deep PPG: Improving Heart Rate Estimates with Activity Prediction"
+  year: 2025
+  conference:
+    name: "2025 1st International Conference on AIML-Applications for Engineering & Technology (ICAET)"
+  doi: "10.1109/ICAET63349.2025.10932185"
