@@ -1,13 +1,111 @@
-name: Tests
-on: [push, pull_request]
-jobs:
-  unit-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
-      - run: pip install -e ".[dev]"
-      - run: pytest -q
+"""Deterministic unit fixtures only. These are NOT physiological validation data."""
+import pickle
+
+import numpy as np
+import pytest
+import torch
+
+from deep_ppg.activity import fit_activity
+from deep_ppg.data import WindowDataset, eligible_rows
+from deep_ppg.model import ActivityAwareCNN
+from deep_ppg.preprocess import load_subject, prepare_subject, window_features
+
+
+def test_constant_windows_finite():
+    spectra, features = window_features(np.zeros(512), np.zeros((256, 3)))
+    assert spectra.shape == (4, 1025)
+    assert features.shape == (60,)
+    assert np.isfinite(spectra).all() and np.isfinite(features).all()
+    assert np.array_equal(spectra, np.zeros_like(spectra))
+
+
+def test_shape_and_nonfinite_rejected():
+    with pytest.raises(ValueError):
+        window_features(np.zeros(511), np.zeros((256, 3)))
+    with pytest.raises(ValueError):
+        window_features(np.full(512, np.nan), np.zeros((256, 3)))
+
+
+def _fixture(path, activity_length=40):
+    data = dict(signal=dict(wrist=dict(BVP=np.zeros((640, 1)), ACC=np.zeros((320, 3)))),
+                label=np.array([60., 70.]), activity=np.ones((activity_length, 1)))
+    with path.open("wb") as stream:
+        pickle.dump(data, stream)
+
+
+def test_pickle_window_alignment(tmp_path):
+    source, target = tmp_path / "S1.pkl", tmp_path / "S1.npz"
+    _fixture(source)
+    assert prepare_subject(source, target) == 2
+    with np.load(target) as data:
+        np.testing.assert_array_equal(data["start_seconds"], [0, 2])
+        np.testing.assert_array_equal(data["hr"], [60, 70])
+        np.testing.assert_array_equal(data["activity"], [1, 1])
+        assert data["spectra"].shape == (2, 4, 1025)
+    _fixture(source, activity_length=39)
+    with pytest.raises(ValueError, match="misalign"):
+        load_subject(source)
+
+
+def test_histories_do_not_cross_subject_boundaries():
+    data = dict(subject=np.array(["S1"] * 4 + ["S2"] * 4), start_seconds=np.tile([0, 2, 4, 6], 2),
+                spectra=np.zeros((8, 4, 1025), dtype=np.float32), hr=np.full(8, 60, dtype=np.float32))
+    rows = eligible_rows(data, 3)
+    np.testing.assert_array_equal(rows, [2, 3, 6, 7])
+    dataset = WindowDataset(data, rows, np.zeros((8, 9), dtype=np.float32), 3, 60, 10)
+    x, activity, y = dataset[2]
+    assert x.shape == (4, 3, 1025) and activity.shape == (9,) and y.item() == 0
+
+
+def test_rf_oof_probabilities_with_missing_classes():
+    x = np.zeros((12, 60), dtype=np.float32)
+    labels = np.array([1, 1, 4, 4] * 3)
+    groups = np.repeat(["S1", "S2", "S3"], 4)
+    model, probabilities = fit_activity(x, labels, groups, trees=2)
+    assert set(model.classes_) == {1, 4}
+    assert probabilities.shape == (12, 9)
+    np.testing.assert_allclose(probabilities.sum(axis=1), 1)
+    assert not probabilities[:, [0, 2, 3, 5, 6, 7, 8]].any()
+
+
+@pytest.mark.parametrize("activity_dim", [0, 9])
+def test_cnn_forward_backward(activity_dim):
+    torch.set_num_threads(1)
+    model = ActivityAwareCNN(history=3, activity_dim=activity_dim)
+    x = torch.zeros(2, 4, 3, 1025)
+    probability = torch.full((2, 9), 1 / 9)
+    result = model(x, probability)
+    assert result.shape == (2,) and torch.isfinite(result).all()
+    result.square().mean().backward()
+    assert model.fc2.weight.grad is not None
+
+
+def test_causal_history_ends_at_current_window():
+    spectra = np.stack([np.full((4, 1025), i, dtype=np.float32) for i in range(5)])
+    data = dict(spectra=spectra, hr=np.zeros(5, dtype=np.float32))
+    dataset = WindowDataset(data, [3], np.zeros((5, 9), dtype=np.float32), 3, 0, 1)
+    x, _, _ = dataset[0]
+    np.testing.assert_array_equal(x[0, :, 0].numpy(), [1, 2, 3])
+
+
+def test_activity_cross_fitting_excludes_held_out_subject(monkeypatch):
+    import deep_ppg.activity as module
+    seen = []
+
+    class RecordingClassifier:
+        classes_ = np.array([0])
+
+        def fit(self, x, y):
+            self.trained_groups = set(x[:, 0].tolist())
+            seen.append(self.trained_groups)
+            return self
+
+        def predict_proba(self, x):
+            assert self.trained_groups.isdisjoint(set(x[:, 0].tolist()))
+            return np.ones((len(x), 1))
+
+    monkeypatch.setattr(module, "make_classifier", lambda *args: RecordingClassifier())
+    x = np.repeat(np.arange(3), 4).astype(np.float32).reshape(-1, 1)
+    module.fit_activity(x, np.zeros(12, dtype=int), x[:, 0])
+    assert len(seen) == 4
+    assert seen[-1] == {0.0, 1.0, 2.0}
