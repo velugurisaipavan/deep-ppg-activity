@@ -6,7 +6,7 @@ Sai Pavan Veluguri — *2025 1st International Conference on AIML-Applications f
 [![DOI](https://img.shields.io/badge/DOI-10.1109%2FICAET63349.2025.10932185-blue)](https://doi.org/10.1109/ICAET63349.2025.10932185)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-**Note:** no trained weights or dataset are included; train on PPG-DaLiA to produce results. This is a research prototype, not a clinical or medical device.
+
 
 ## Idea
 
